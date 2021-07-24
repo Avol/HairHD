@@ -1,0 +1,387 @@
+﻿#pragma kernel HairPhysics
+
+struct HairPointData
+{
+    float3  Position;
+    float3  PrevPosition;
+    float3  RotationAngles;
+    float3  Color;
+    
+    int     StrandID;
+    int     StrandPoint;
+    float   StrandThickness;
+    float   StrandStiffness;
+    float   Retention;
+};
+
+
+struct HairStrandData
+{
+    float3  Tangent;
+    float3  Bitangent;
+    float   SegmentLength;
+};
+ 
+
+struct SphereColliderBufferData
+{
+    float3  Position;
+	float   Radius;
+};
+
+ 
+RWStructuredBuffer<HairPointData>               _HairPointData;
+StructuredBuffer<HairStrandData>                _HairStrandData;
+
+StructuredBuffer<SphereColliderBufferData>      _SphereColliders;
+uniform int                                     _SphereColliderCount;
+
+uniform int _StrandSegments;
+
+RWTexture3D<uint> _OccupancyMap;
+SamplerState sampler_OccupancyMap;
+
+uniform bool        _SelfCollision;
+uniform float3      _Center;
+uniform float3      _Bounds;
+
+uniform float       _Time;
+uniform float       _DeltaTime;
+
+uniform float3      _Gravity;
+uniform float       _Damping;
+uniform float       _Stiffness;
+uniform float       _Retention;
+
+
+uniform bool        _Wind;
+
+uniform float       _WindTurbulance;
+uniform float       _WindTurbulance2;
+
+uniform float3      _WindDirection;
+uniform float3      _WindDirection2;
+
+uniform float3      _WindFrequency;
+uniform float3      _WindFrequency2;
+
+
+
+// semi-random linear function x
+// @ n	- seed
+float Hash(float n)
+{
+    return frac(sin(n) * 43758.5453123);
+}
+
+// Procedural 3D noise
+// A purely procedural 3D noise, counterpart for the texture based one.
+// @ x - noise seed
+float ProceduralNoise(float3 x)
+{
+    float3 p = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n = p.x + p.y * 157.0 + 113.0 * p.z;
+    return lerp(lerp(lerp(Hash(n + 0.0), Hash(n + 1.0), f.x),
+		lerp(Hash(n + 157.0), Hash(n + 158.0), f.x), f.y),
+		lerp(lerp(Hash(n + 113.0), Hash(n + 114.0), f.x),
+			lerp(Hash(n + 270.0), Hash(n + 271.0), f.x), f.y), f.z);
+}
+
+
+void ComputeGravity(inout HairPointData strandData)
+{
+    if (strandData.StrandPoint > 1)
+        strandData.Position += _Gravity;
+}
+
+void ComputeStretchString(uint id, inout HairPointData pointData, HairStrandData strandData)
+{
+    if (pointData.StrandPoint < 2)
+        return;
+
+    float3 prevPosition     = _HairPointData[id-1].Position;
+
+    float3 diff             = pointData.Position - prevPosition;
+    float3 offset           = normalize(diff) * strandData.SegmentLength; 
+    
+    pointData.Position = prevPosition + offset;
+}
+
+void ComputeStifness(uint id, inout HairPointData pointData, HairStrandData strandData)
+{
+    if (pointData.StrandPoint < 2)
+        return;
+    
+    float3 prevPosition2    = _HairPointData[id - 2].Position;
+    float3 prevPosition     = _HairPointData[id - 1].Position;
+    
+    float3 diff             = prevPosition2 - prevPosition;
+    float3 diff2 = prevPosition - pointData.Position;
+    
+   
+    if (length(diff) != 0 && length(diff2) != 0)
+    {
+        float3  prevBend            = prevPosition - normalize(diff) * strandData.SegmentLength;
+        float   dotStiffness        = 1.0f - max(0, dot(normalize(diff), normalize(diff2)));
+        float   stiffness           = _Stiffness * pointData.StrandStiffness;
+        pointData.Position = lerp(pointData.Position, prevBend, stiffness * lerp(dotStiffness, 1, stiffness));
+    }
+}
+
+void ComputeRetention(uint id, inout HairPointData pointData, HairStrandData strandData, inout float3 tangent, inout float3 bitangent)
+{
+    if (pointData.StrandPoint > 1)
+    {
+        float3 prevPosition     = _HairPointData[id - 1].Position;
+        float3 prevTangent      = normalize(tangent);
+        float3 prevBitangent    = normalize(bitangent);
+        float3 prevNormal       = normalize(_HairPointData[id - 1].Position - _HairPointData[id - 2].Position);
+        float3 angles           = pointData.RotationAngles;
+        
+        float3 currentNormal    = prevNormal * angles.z + prevTangent * angles.x + prevBitangent * angles.y;
+        float3 targetPostion    = prevPosition + currentNormal * strandData.SegmentLength;
+        
+        float retention         = _Retention * pointData.Retention;
+        pointData.Position     = lerp(pointData.Position, targetPostion, retention);
+        
+
+        tangent     = normalize(prevTangent - currentNormal * angles.x);
+        bitangent   = normalize(prevBitangent - currentNormal * angles.y);
+        
+        
+        // correct T, B angle error.
+		/*float3 currentTangentT		= 0;
+        float3 currentBitangentT    = 0;
+
+		float3 c1 = cross(currentNormal, float3(0.0f, 0.0f, 1.0f));
+		float3 c2 = cross(currentNormal, float3(0.0f, 1.0f, 0.0f));
+
+		if (length(c1) > length(c2))	currentTangentT = normalize(c1);
+		else							currentTangentT = normalize(c2);
+
+        currentBitangentT = normalize(cross(currentTangentT, currentNormal));
+
+		float closestTangentDot = -1.0f;
+
+        float k0 = dot(tangent, currentTangentT);
+        float k1 = dot(tangent, -currentTangentT);
+        float k2 = dot(tangent, currentBitangentT);
+        float k3 = dot(tangent, -currentBitangentT);
+
+		if (k0 > closestTangentDot)
+		{
+			closestTangentDot = k0;
+            tangent = currentTangentT;
+        }
+		if (k1 > closestTangentDot)
+		{
+			closestTangentDot = k1;
+            tangent = -currentTangentT;
+        }
+		if (k2 > closestTangentDot)
+		{
+			closestTangentDot = k2;
+            tangent = currentBitangentT;
+        }
+		if (k3 > closestTangentDot)
+		{
+			closestTangentDot = k3;
+            tangent = -currentBitangentT;
+        }*/
+
+        bitangent = cross(tangent, currentNormal);
+    }
+}
+
+
+void ComputeVelocity(float3 prevPos, inout HairPointData pointData)
+{    
+    if (pointData.StrandPoint > 1)
+    {
+        float3 velocity = pointData.Position - pointData.PrevPosition;
+        pointData.Position += velocity * (1.0 - _Damping);
+    }
+        
+    pointData.PrevPosition = prevPos;
+}
+
+
+void ComputeSphereCollisions(inout HairPointData pointData)
+{
+    if (pointData.StrandPoint < 2)
+        return;
+        
+    for (int i = 0; i < _SphereColliderCount; i++)
+    {
+        float3  diff    = pointData.Position - _SphereColliders[i].Position;
+        float   offset  = max(0, _SphereColliders[i].Radius - length(diff));
+
+        pointData.Position += normalize(diff) * offset;
+    }
+}
+
+float3 ComputeSelfCollision(HairPointData strandData)
+{
+    if (strandData.StrandPoint == 0)
+        return strandData.Position;
+
+    const uint3 volumeSize        = uint3(64, 64, 64);
+
+    float3  volumePosition              = (volumeSize / 2) + ((_Center - strandData.Position) / _Bounds) * (volumeSize / 2);
+
+
+    float occupancy     = _OccupancyMap[volumePosition];
+
+    /*float xOccupancy    = _OccupancyMap[volumePosition + float3(0.01f, 0, 0)];
+    float yOccupancy    = _OccupancyMap[volumePosition + float3(0, 0.01f, 0)];
+    float zOccupancy    = _OccupancyMap[volumePosition + float3(0, 0, 0.01f)];
+
+    float xMove         = (occupancy - xOccupancy); 
+    float yMove         = (occupancy - yOccupancy);
+    float zMove         = (occupancy - zOccupancy);
+
+    strandData.Position += float3(xMove, yMove, zMove) / (4294967295.0f * 0.5f);*/
+
+
+    const float delta = 0.02f;
+
+    float FLDownOccupancy   = _OccupancyMap[volumePosition + float3(-1, -1, 1) * delta] - occupancy;
+    float BLDownOccupancy   = _OccupancyMap[volumePosition + float3(-1, -1, -1) * delta] - occupancy;
+    
+    float FRDownOccupancy   = _OccupancyMap[volumePosition + float3(1, -1, 1) * delta] - occupancy;
+    float BRDownOccupancy   = _OccupancyMap[volumePosition + float3(1, -1, -1) * delta] - occupancy;
+
+    float FLUpOccupancy     = _OccupancyMap[volumePosition + float3(-1, 1, 1) * delta] - occupancy;
+    float BLUpOccupancy     = _OccupancyMap[volumePosition + float3(-1, 1, -1) * delta] - occupancy;
+    
+    float FRUpOccupancy     = _OccupancyMap[volumePosition + float3(1, 1, 1) * delta] - occupancy;
+    float BRUpOccupancy     = _OccupancyMap[volumePosition + float3(1, 1, -1) * delta] - occupancy;
+
+    float3 move = 0;
+
+    move -= float3(-1, -1, 1)       * FLDownOccupancy;
+    move -= float3(1, 1, -1)        * BRUpOccupancy;
+
+    move -= float3(-1, -1, -1)      * BLDownOccupancy;
+    move -= float3(1, 1, 1)         * FRUpOccupancy;
+
+    move -= float3(1, -1, 1)        * FRDownOccupancy;
+    move -= float3(-1, 1, -1)       * BLUpOccupancy;
+
+    move -= float3(1, -1, -1)       * BRDownOccupancy;
+    move -= float3(-1, 1, 1)        * FLUpOccupancy;
+
+
+
+    move.x = delta * (_Bounds.x * 2 / 64.0f) * sign(move.x) * min(1, abs(move.x) * 0.0001f) * 0.5f;
+    move.y = delta * (_Bounds.y * 2 / 64.0f) * sign(move.y) * min(1, abs(move.y) * 0.0001f) * 0.5f;
+    move.z = delta * (_Bounds.z * 2 / 64.0f) * sign(move.z) * min(1, abs(move.z) * 0.0001f) * 0.5f;
+
+   // move *= 0.0001f;
+
+   // move.x = _Bounds.x * delta * min(100000, move.x * 0.01f);
+   // move.y = _Bounds.y * delta * min(100000, move.y * 0.01f);
+   // move.z = _Bounds.z * delta * min(100000, move.z * 0.01f);
+
+    strandData.Position += move;
+
+
+
+   /* FLDownOccupancy - occupancy
+
+
+    float moveX = 0;
+    if (FLDownOccupancy > FLUpOccupancy)
+    {
+        moveX = FLDownOccupancy - occupancy;
+    }
+    else
+    {
+        moveX = FLUpOccupancy - occupancy;
+    }*/
+       
+
+
+    /*int3    volumePositionFixed         = (volumeSize / 2) + round(((_Center - strandData.Position) / _Bounds) * (volumeSize / 2));
+
+    if (_OccupancyMap[volumePosition] != _OccupancyMap[volumePositionFixed])
+        strandData.Position += float3(0, 0.001f, 0);*/
+    
+        
+
+  //  1, 0, 0
+  //  -1, 0, 0;
+
+  //  float3  direction                   = volumePositionFixed - volumePosition;
+    
+    /*float o0 = _OccupancyMap[volumePosition];
+    float o1 = _OccupancyMap[volumePositionFixed];
+
+    if (o0 > o1)
+        direction *= -1;
+
+    float3 scalar = volumeSize * 0.5f * _Bounds;
+
+    //if (_OccupancyMap[volumePositionFixed] > 50)
+    //{
+        strandData.Position += direction * scalar * o1 * 0.0000000001f;
+    //}
+*/
+
+        return strandData.Position;
+}
+
+void ComputeWind(inout HairPointData pointData)
+{
+    if (_Wind)
+    {
+        if (pointData.StrandPoint < 2)
+            return;
+        
+        float   noise   = ProceduralNoise((pointData.Position + _Time) * _WindFrequency); 
+        float3  wind    = lerp(_WindDirection, _WindDirection * noise, _WindTurbulance);
+        pointData.Position += wind;
+        
+        if (length(_WindDirection2) != 0)
+        {
+            float   noise2  = ProceduralNoise((pointData.Position + _Time + 0.707f) * _WindFrequency2);
+            float3  wind2   = lerp(_WindDirection2, _WindDirection2 * noise2, _WindTurbulance2);
+            pointData.Position += wind2;
+        }
+    } 
+}
+
+
+
+
+[numthreads(1,1,1)]
+void HairPhysics (uint3 id : SV_DispatchThreadID)
+{
+    HairStrandData strandData = _HairStrandData[id.x];
+    
+    float3 prevTangent      = strandData.Tangent;
+    float3 prevBitangent    = strandData.Bitangent;
+    
+    for (int i = 0; i < _StrandSegments; i++)
+    {
+        uint index = id.x * _StrandSegments + i;
+        
+        HairPointData pointData = _HairPointData[index];
+        
+        float3 prevPos = pointData.Position;
+        
+        ComputeGravity(pointData);
+        ComputeWind(pointData);
+        ComputeVelocity(prevPos, pointData);
+        
+        ComputeStifness(index, pointData, strandData);
+        ComputeRetention(index, pointData, strandData, prevTangent, prevBitangent);
+        ComputeStretchString(index, pointData, strandData);
+        ComputeSphereCollisions(pointData);
+        
+        _HairPointData[index] = pointData;
+    }
+}

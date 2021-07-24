@@ -1,0 +1,118 @@
+﻿#pragma kernel HairLocalToWorldAll
+#pragma kernel HairLocalToWorld
+#pragma kernel HairWorldToLocal
+
+struct HairPointData
+{
+    float3 Position;
+    float3 PrevPosition;
+    float3 RotationAngles;
+    float3 Color;
+    
+    int StrandID;
+    int StrandPoint;
+    float StrandThickness;
+    float StrandStiffness;
+    float Retention;
+};
+
+struct HairStrandData
+{
+    float3 Tangent;
+    float3 Bitangent;
+    float SegmentLength;
+};
+
+RWStructuredBuffer<HairPointData>       _HairPointData;
+RWStructuredBuffer<HairStrandData>      _HairStrandData;
+
+uniform float4x4 _GlobalTransform;
+uniform float4x4 _GlobalTransformInverse;
+uniform int _StrandPoints;
+
+[numthreads(1, 1, 1)]
+void HairLocalToWorldAll(uint3 id : SV_DispatchThreadID)
+{
+    HairPointData       pointData       = _HairPointData[id.x];
+
+    // transform position.
+    float4 position = mul(_GlobalTransform, float4(pointData.Position, 1));
+    pointData.Position = position.xyz / position.w;    
+    pointData.PrevPosition = pointData.Position;
+    
+    // transform rotations.
+    if (pointData.StrandPoint == 1)
+    {
+        int strandID = floor(id.x / _StrandPoints);
+        HairStrandData strandData = _HairStrandData[strandID];
+        
+        float4 tangent = mul(_GlobalTransform, float4(normalize(strandData.Tangent), 0));
+        strandData.Tangent = tangent.xyz;
+            
+        float4 bitangent = mul(_GlobalTransform, float4(normalize(strandData.Bitangent), 0));
+        strandData.Bitangent = bitangent.xyz;
+    
+        _HairStrandData[strandID] = strandData;
+    }
+    
+    _HairPointData[id.x] = pointData;
+}
+
+[numthreads(1,1,1)]
+void HairLocalToWorld(uint3 id : SV_DispatchThreadID)
+{
+    // read buffers.
+    HairPointData   pointData       = _HairPointData[id.x * _StrandPoints];
+    HairPointData   pointData2      = _HairPointData[id.x * _StrandPoints + 1];
+    HairStrandData  strandData      = _HairStrandData[id.x];
+
+    // transform position.
+    float4 position = mul(_GlobalTransform, float4(pointData.Position, 1));
+    pointData.Position      = position.xyz / position.w;
+    pointData.PrevPosition  = pointData.Position;
+    
+    float4 position2 = mul(_GlobalTransform, float4(pointData2.Position, 1));
+    pointData2.Position     = position2.xyz / position2.w;
+    pointData2.PrevPosition = pointData2.Position;
+
+    // transform rotations.
+    float4 tangent = mul(_GlobalTransform, float4(normalize(strandData.Tangent), 0));
+    strandData.Tangent = tangent.xyz;
+            
+    float4 bitangent = mul(_GlobalTransform, float4(normalize(strandData.Bitangent), 0));
+    strandData.Bitangent = bitangent.xyz;
+
+     // write buffers.
+    _HairPointData[id.x * _StrandPoints]        = pointData;
+    _HairPointData[id.x * _StrandPoints + 1]    = pointData2;
+    _HairStrandData[id.x]                       = strandData;
+}
+
+[numthreads(1, 1, 1)]
+void HairWorldToLocal(uint3 id : SV_DispatchThreadID)
+{
+    // read buffers.
+    HairPointData   pointData       = _HairPointData[id.x * _StrandPoints];
+    HairPointData   pointData2      = _HairPointData[id.x * _StrandPoints + 1];
+    HairStrandData  strandData      = _HairStrandData[id.x];
+    
+    // transform position.
+    float4 position = mul(_GlobalTransformInverse, float4(pointData.Position, 1));
+    pointData.Position = position.xyz / position.w;
+    
+    float4 position2 = mul(_GlobalTransformInverse, float4(pointData2.Position, 1));
+    pointData2.Position = position2.xyz / position2.w;
+    
+
+    // transform rotations.
+    float4 tangent = mul(_GlobalTransformInverse, float4(normalize(strandData.Tangent), 0));
+    strandData.Tangent = tangent.xyz;
+
+    float4 bitangent = mul(_GlobalTransformInverse, float4(normalize(strandData.Bitangent), 0));
+    strandData.Bitangent = bitangent.xyz;
+
+    // write buffers.
+    _HairPointData[id.x * _StrandPoints]        = pointData;
+    _HairPointData[id.x * _StrandPoints + 1]    = pointData2;
+    _HairStrandData[id.x]                       = strandData;
+}

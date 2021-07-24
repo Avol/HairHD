@@ -1,0 +1,53 @@
+﻿#pragma kernel HairOccupancy
+//#pragma kernel HairOccupancyToFloat
+
+struct HairPointData
+{
+    float3 Position;
+    float3 PrevPosition;
+    float3 RotationAngles;
+    float3 Color;
+    
+    int StrandID;
+    int StrandPoint;
+    float StrandThickness;
+    float StrandStiffness;
+    float Retention;
+};
+
+struct HairStrandData
+{
+    float3 Tangent;
+    float3 Bitangent;
+    float SegmentLength;
+};
+
+
+RWStructuredBuffer<HairPointData>   _HairPointData;
+StructuredBuffer<HairStrandData>    _HairStrandData;
+
+RWTexture3D<uint>   _OccupancyMap;
+//RWTexture3D<float>  _OccupancyMapFloat;
+
+uniform float3 _Center;
+uniform float3 _Bounds;
+ 
+[numthreads(1, 1, 1)]
+void HairOccupancy(uint3 id : SV_DispatchThreadID)
+{
+    HairPointData strandData = _HairPointData[id.x];
+
+    uint3 volumeSize        = uint3(64, 64, 64);
+    uint3 volumePosition    = (volumeSize / 2) + round(((_Center - strandData.Position) / _Bounds) * (volumeSize / 2));
+
+    InterlockedAdd(_OccupancyMap[volumePosition], 1);
+}
+
+/*
+[numthreads(4, 4, 4)]
+void HairOccupancyToFloat(uint3 id : SV_DispatchThreadID)
+{
+    const float _32bitfloat = 4294967295;
+    _OccupancyMapFloat[id.xyz] = ((float) _OccupancyMap[id.xyz]) / _32bitfloat;
+}
+*/
